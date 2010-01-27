@@ -90,15 +90,14 @@ get_change_number_from_branch() {
 }
 
 patch_count_for_change() {
-  local changeref="refs/remotes/changes/${1:(-2)}/$1"
-  $GIT rev-parse --symbolic-full-name --all | \
-    grep $changeref | \
-    awk 'BEGIN { max=0 }
-               { p=$0;
-                 sub( "^.*/", "", p );
-                 p=int( p );
-                 if ( p>max ) max=p; }
-           END { print max }'
+  local change_id=$1
+  local hash=$(($change_id % 100))
+  case $hash in
+  [0-9]) hash="0$hash" ;;
+  esac
+
+  $GIT ls-remote $REMOTE "refs/changes/$hash/$change_id/*" | \
+    sed 's/.*\///g' | sort -n | tail -n1
 }
 
 printShortUsage() {
@@ -276,8 +275,9 @@ resetReview() {
 }
 
 approveChange() {
-  local url_line=$($GIT remote show -n changes | grep "URL: " | head -n1)
+  local url_line=$($GIT remote show -n origin | grep "URL: " | head -n1)
   local host_and_project=${url_line# *URL: }
+  host_and_project=${host_and_project#ssh://}
   local host=${host_and_project%:*}
   local project=${host_and_project#*:}
 
