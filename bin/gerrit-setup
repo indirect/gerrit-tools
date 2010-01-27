@@ -1,0 +1,36 @@
+#!/bin/bash
+
+die() {
+  echo "something went wrong -- you may have to do this manually"
+  exit 2
+}
+
+# require a hostname
+if [[ -z "$GERRIT" ]]; then
+  echo "error: gerrit hostname not set (retry with GERRIT=review.example.com)"
+  exit 1
+fi
+
+# check for a project name or just use the dir name
+if [[ -z "$GERRIT_PROJECT" ]]; then
+  GERRIT_PROJECT=$(basename $PWD)
+  echo "note: assuming gerrit project name is $GERRIT_PROJECT (retry with GERRIT_PROJECT=foobar to change)"
+fi
+
+# rename origin -> github if we haven't already
+if ! git remote show github 2>/dev/null 1>&2; then
+  echo "renaming origin to github"
+  git remote rename origin github || die
+  echo "adding gerrit remote as origin"
+  git remote add origin ssh://$GERRIT:29418/$GERRIT_PROJECT.git || die
+  echo "changing master to point to gerrit"
+  git config branch.master.remote origin || die
+  # make sure "git push" works as expected
+  git config remote.origin.push HEAD:refs/for/master || die
+fi
+
+# copy the commit-msg hook to get Change-Id support
+if ! test -x .git/hooks/commit-msg; then
+  echo "adding gerrit commit message hook"
+  scp -p -P 29418 $GERRIT:hooks/commit-msg .git/hooks/ || die
+fi
