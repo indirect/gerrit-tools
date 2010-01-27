@@ -1,0 +1,496 @@
+#!/bin/bash
+
+CURRENT=$(git symbolic-ref -q HEAD || git rev-parse HEAD)
+CURRENT=${CURRENT#refs/heads/}
+
+this=$(basename "$0")
+
+# default settings
+explain=false
+verbose=true
+run=true
+
+# colors
+RED="\033[0;31m"
+YELLOW="\033[1;33m"
+GREEN="\033[0;32m"
+NO_COLOR="\033[0m"
+
+die() {
+  echo -e "${RED}${@}${NO_COLOR}"
+  exit 1
+}
+
+warn() {
+  echo -e "${YELLOW}${@}${NO_COLOR}"
+}
+
+good() {
+  echo -e "${GREEN}${@}${NO_COLOR}"
+}
+
+#git stuff
+GIT=`which git`
+
+GIT_OUTPUT_FILE="/tmp/git_output$$"
+
+git() {
+  if [ "$verbose" = true ]; then
+    echo -e "+ ${GREEN}git $@${NO_COLOR}"
+  fi
+
+  if [ "$run" = true ]; then
+    $GIT $@ 2>&1 | tee /dev/tty > $GIT_OUTPUT_FILE
+    return ${PIPESTATUS[0]}
+  fi
+}
+
+trap _cleanup_git_output EXIT
+
+_cleanup_git_output() {
+  rm -f $GIT_OUTPUT_FILE
+}
+
+no_changes () {
+  $GIT diff-index --quiet --cached HEAD -- &&
+  $GIT diff-files --quiet
+}
+
+check_stash() {
+  if [ "$stashed" = true ]; then
+    warn "Your stashed changes were not applied because an error occurred. Don't panic. They are not lost. Look for them in \"git stash list\"."
+  fi
+}
+
+is_integer() {
+  [ "$1" -eq "$1" ] > /dev/null 2>&1
+  return $?
+}
+
+is_review_branch() {
+  local branch=$1
+  if [ "${branch:0:1}" = "r" ]; then
+    local change=${branch:1}
+    if is_integer $change; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+get_change_number_from_branch() {
+  if is_review_branch $CURRENT; then
+    CHANGE=${CURRENT:1}
+    if [ $run = true ]; then
+      good "Using change number $CHANGE from branch name"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+patch_count_for_change() {
+  local changeref="refs/remotes/changes/${1:(-2)}/$1"
+  $GIT rev-parse --symbolic-full-name --all | \
+    grep $changeref | \
+    awk 'BEGIN { max=0 }
+               { p=$0;
+                 sub( "^.*/", "", p );
+                 p=int( p );
+                 if ( p>max ) max=p; }
+           END { print max }'
+}
+
+printShortUsage() {
+  echo "Usage: $this [<options>] push [<change number>]"
+  echo "   or: $this [<options>] <change number>"
+  echo "   or: $this [<options>] reset"
+}
+printUsage() {
+  printShortUsage
+  echo
+  echo "OPTIONS"
+  echo "  -h  --help                  Show this message"
+  echo "  -v  --verbose               Show all commands before running them (default: on)"
+  echo "  -q  --quiet                 Don't display commands before running them (default: off)"
+  echo "  -e  --explain  --dry-run    Don't actually run commands (default: off)"
+  echo
+  echo "DESCRIPTION"
+  echo "  $this assists in code reviews with gerrit, both pushing or pulling changesets to review."
+  echo
+  echo "  push [<change number>]"
+  echo "    Pushes a single patch to gerrit for review. If your HEAD is a tracking branch"
+  echo "    $this will reset it to the remote branch after successfully pushing the changeset."
+  echo "    If you are working on a non-tracking branch, that branch will be left alone."
+  echo
+  echo "    Given a change number, the current patch will replace the existing one, following"
+  echo "    the same reset rules as above."
+  echo
+  echo "    NOTE: If the BROWSER environment variable is set, the Gerrit page for the pushed"
+  echo "    change will be opened in that browser (e.g. 'open' or '/usr/local/bin/firefox')."
+  echo
+  echo "  <change number>"
+  echo "    Applies the latest patch for the change at <change number> on top of the current"
+  echo "    branch, if it's a tracking branch, or master on a branch named for <change number>,"
+  echo "    allowing you to review the change."
+  echo
+  echo "  update"
+  echo "    Updates the review branch that you're currently on to the latest patch."
+  echo
+  echo "  approve"
+  echo "    Approves the current patch but does not merge it."
+  echo
+  echo "  reset"
+  echo "    Removes the current change branch created by the 'start' subcommand and switches"
+  echo "    back to master."
+  echo
+  echo "  diff <change number> [<patch number> <patch number>]"
+  echo "    Displays a diff of the last two patches applies to the given changeset, or between"
+  echo "    the given patches of that changeset."
+  echo
+  echo "  rebase [<change number>]"
+  echo "    Rebases the latest patch for a given change number (or the current change branch)"
+  echo "    against master, then submits it as a new patch to that change. This helps deal with"
+  echo "    Gerrit's \"Your change could not be merged due to a path conflict\" error message."
+  echo
+  echo "  open"
+  echo "    Opens the currently checked-out Gerrit change's page in the browser (given by the"
+  echo "    BROWSER environment variable)."
+}
+
+
+getBranchInfo() {
+  REMOTE=`$GIT config branch.$CURRENT.remote`
+
+  if [ -z "$REMOTE" ]; then
+    REMOTE=origin
+  fi
+
+  TRACK=`$GIT config branch.$CURRENT.merge`
+
+  if [ -z "$TRACK" ]; then
+    TRACK=refs/heads/master
+  fi
+
+  TRACK=${TRACK#refs/heads/}
+}
+
+pushReview() {
+  abort_on_bad_repo_state
+  getBranchInfo
+
+  local change=$1
+  if [ -z "$change" ]; then
+    if get_change_number_from_branch; then
+      change=$CHANGE
+    fi
+  fi
+
+  local LOG=$($GIT log --pretty="format:%s" $REMOTE/$TRACK..HEAD)
+  local CHANGESETS=$($GIT rev-list $REMOTE/$TRACK..HEAD | wc -l)
+  local CHANGESETS=${CHANGESETS//[[:space:]]}
+
+  if [ "$run" = true ]; then
+    if [ "$CHANGESETS" = "0" ]; then
+      die "You have no changes to review. Are you on the right branch?"
+    elif [ "$CHANGESETS" != "1" ]; then
+      die "You have $CHANGESETS changes, but you should only push one at a time. Did you forget to squash your commits?"
+    fi
+  fi
+
+  local change_args=''
+
+  if [ -z "$change" ]; then
+    change_args="$REMOTE HEAD:refs/for/$TRACK"
+  else
+    change_args="$REMOTE HEAD:refs/changes/$change"
+  fi
+
+  git push $change_args ||
+    die "Could not push your changes for review. Perhaps you need to update first?"
+
+  git_push_output=$(test -f $GIT_OUTPUT_FILE && cat $GIT_OUTPUT_FILE)
+
+  if [ "$CURRENT" = "master" ]; then
+    git reset --hard $REMOTE/$TRACK ||
+      die "Could not reset your $TRACK branch to $REMOTE/$TRACK."
+  fi
+
+  if [ "$run" = true ]; then
+    url=$(echo "$git_push_output" | grep http | head -n1)
+
+    if [[ ! -z "$BROWSER" && ! -z "$url" ]]; then
+      eval "$BROWSER $url"
+    fi
+
+    if [ "$CURRENT" = "master" ]; then
+      good "Successfully pushed '$LOG' for review and reset $TRACK"
+    else
+      good "Successfully pushed '$LOG' for review"
+    fi
+  fi
+}
+
+# git review 100
+startReview() {
+  abort_on_bad_repo_state
+  getBranchInfo
+
+  # $GIT remote show -n changes 2>/dev/null 1>&2 ||
+  #   die "In order to use $this to start a review, you need a 'changes' remote. Please add it before trying again."
+
+  # pick up the latest patch for the changeset we're reviewing
+  # git fetch changes ||
+  #   die "Unable to fetch changes, please check your network connection"
+
+  local change=$1
+
+  # create a new branch based on the current tracking branch to work in
+  local branch=r$change
+  $GIT branch -D $branch 2>/dev/null 1>&2
+  git checkout -b $branch $TRACK ||
+    die "Unable to create a new branch '$branch'"
+
+  # apply the change to the new branch
+  gerrit-cherry-pick --latest $REMOTE $change ||
+    die "Unable to apply ±$change on top of $TRACK"
+
+  if [ "$run" = true ]; then
+    good "Successfully cherry-picked ±$change so you can begin reviewing it"
+  fi
+}
+
+
+# git review reset
+resetReview() {
+  abort_on_bad_repo_state
+
+  if [ ! -z "$@" ]; then
+    warn "$this: unrecognized argument $1 for 'reset' subcommand"
+    printUsage
+    exit 2
+  fi
+
+  git checkout master && git branch -D $CURRENT ||
+    die "Unable to close the review branch $CURRENT"
+}
+
+approveChange() {
+  local url_line=$($GIT remote show -n changes | grep "URL: " | head -n1)
+  local host_and_project=${url_line# *URL: }
+  local host=${host_and_project%:*}
+  local project=${host_and_project#*:}
+
+  getBranchInfo
+
+  get_change_number_from_branch ||
+    die "Unable to get change number from $CURRENT"
+  local PATCH=$(patch_count_for_change $CHANGE)
+
+  local LOG=$($GIT log --pretty="format:%s" $REMOTE/$TRACK..HEAD)
+  good "Approving '$LOG'..."
+  ssh $host gerrit approve \
+      --verified=+1 \
+      --code-review=+2 \
+      --project=$project $CHANGE,$PATCH ||
+    die "Unable to approve the commit"
+}
+
+diffPatches() {
+  getBranchInfo
+
+  local change=$1
+  local patch1=$2
+  local patch2=$3
+
+  if [ -z "$change" ]; then
+    if get_change_number_from_branch; then
+      change=$CHANGE
+    else
+      die "You must specify a changeset (and optionally, patch numbers) to diff"
+    fi
+  fi
+
+  local changeref=refs/remotes/changes/${change:(-2)}/$change
+
+  if [ -z "$patch1" ] || [ -z "$patch2" ]; then
+    local patch2=$(patch_count_for_change $change)
+    local patch1=$((patch2 - 1))
+  fi
+
+  if [ "$patch1" = "$patch2" ]; then
+    die "Only one patchset--nothing to diff!"
+  fi
+
+  local patchref1="$changeref/$patch1"
+  local patchref2="$changeref/$patch2"
+  local branch1="r$change,$patch1"
+  local branch2="r$change,$patch2"
+
+  # create a branch for patch1
+  $GIT checkout -b $branch1 $TRACK >/dev/null 2>&1 ||
+    die "Unable to create a new branch '$branch1'"
+  $GIT cherry-pick $patchref1 >/dev/null 2>&1 ||
+    die "Unable to apply ±$branch1 on top of $TRACK"
+
+  # create a branch for patch2
+  $GIT checkout -b $branch2 $TRACK >/dev/null 2>&1 ||
+    die "Unable to create a new branch '$branch2'"
+  $GIT cherry-pick $patchref2 >/dev/null 2>&1 ||
+    die "Unable to apply ±$branch2 on top of $TRACK"
+
+  # actually show the diff
+  $GIT diff --src-prefix=$branch1: --dst-prefix=$branch2: --color $branch1 $branch2 | less -rf
+
+  $GIT checkout "$CURRENT" >/dev/null 2>&1 ||
+    die "Unable to switch back to $CURRENT"
+
+  $GIT branch -D $branch1 $branch2 >/dev/null 2>&1 ||
+    die "Unable to delete temporary patch branches"
+}
+
+rebaseReview() {
+  abort_on_bad_repo_state
+
+  local change=$1
+  if [ -z "$change" ]; then
+    if is_review_branch $CURRENT; then
+      local change=${CURRENT:1}
+      if [ $run = true ]; then
+        good "Using change number $change from branch name"
+      fi
+    else
+      die "Please provide a change number to rebase (see help for more info)"
+    fi
+  fi
+
+  if ! is_review_branch $CURRENT; then
+    # if not already on a review branch, fetch and check it out
+    startReview $change
+  fi
+
+  # try to push this patch along
+  pushReview $change
+
+  # reset if we weren't already on a review branch
+  if is_review_branch $CURRENT; then
+    resetReview
+  fi
+}
+
+updateReview() {
+  if ! is_review_branch $CURRENT; then
+    warn "$CURRENT is not a review branch"
+    printUsage
+    exit 2
+  fi
+
+  abort_on_bad_repo_state
+
+  local change=${CURRENT:1}
+  resetReview
+  startReview $change
+}
+
+openReview() {
+  getBranchInfo
+
+  if ! get_change_number_from_branch; then
+    warn "$CURRENT is not a review branch"
+    exit 2
+  fi
+
+  if [[ -z "$BROWSER" ]]; then
+    warn "BROWSER is not set. Sorry."
+    exit 2
+  fi
+
+  ssh_url=$($GIT config remote.$REMOTE.url)
+  ssh_url=${ssh_url#ssh://}
+  ssh_url=${ssh_url#*@}
+  ssh_url=${ssh_url%/*}
+  ssh_url=${ssh_url%:*}
+  eval "$BROWSER http://$ssh_url/$CHANGE"
+  exit 0
+}
+
+abort_on_bad_repo_state() {
+  if ! no_changes; then
+    die "You have local changes. Please do something with them before using $this"
+  fi
+
+  $GIT svn info >/dev/null 2>/dev/null &&
+    die "$this does not support git-svn repositories."
+}
+
+while true; do
+  arg=$1
+  shift
+  test -z "$arg" && break;
+
+  case $arg
+  in
+    -e | --explain | --dry-run)
+      echo "$this: using explain-only mode"
+      explain=true
+      verbose=true
+      run=false
+      ;;
+    -v | --verbose)
+      verbose=true
+      ;;
+    -q | --quiet)
+      verbose=false
+      ;;
+    -h | --help)
+      printUsage
+      exit
+      ;;
+    start)
+      startReview $1
+      exit
+      ;;
+    reset)
+      resetReview $@
+      exit
+      ;;
+    push)
+      pushReview $1
+      exit
+      ;;
+    diff)
+      diffPatches $1 $2 $3
+      exit
+      ;;
+    rebase)
+      rebaseReview $1
+      exit
+      ;;
+    approve)
+      approveChange
+      exit
+      ;;
+    update)
+      updateReview
+      exit
+      ;;
+    open)
+      openReview
+      exit
+      ;;
+    *)
+      if is_integer $arg; then
+        startReview $arg
+        exit
+      else
+        warn "$this: unrecognized option or subcommand $arg"
+        printUsage
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+# no subcommand given
+printShortUsage
+exit 2
