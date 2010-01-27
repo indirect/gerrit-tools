@@ -322,21 +322,19 @@ diffPatches() {
     die "Only one patchset--nothing to diff!"
   fi
 
-  local patchref1="$changeref/$patch1"
-  local patchref2="$changeref/$patch2"
   local branch1="r$change,$patch1"
   local branch2="r$change,$patch2"
 
   # create a branch for patch1
   $GIT checkout -b $branch1 $TRACK >/dev/null 2>&1 ||
     die "Unable to create a new branch '$branch1'"
-  $GIT cherry-pick $patchref1 >/dev/null 2>&1 ||
+  gerrit-cherry-pick $REMOTE $change/$patch1 >/dev/null 2>&1 ||
     die "Unable to apply ±$branch1 on top of $TRACK"
 
   # create a branch for patch2
   $GIT checkout -b $branch2 $TRACK >/dev/null 2>&1 ||
     die "Unable to create a new branch '$branch2'"
-  $GIT cherry-pick $patchref2 >/dev/null 2>&1 ||
+  gerrit-cherry-pick $REMOTE $change/$patch2 >/dev/null 2>&1 ||
     die "Unable to apply ±$branch2 on top of $TRACK"
 
   # actually show the diff
