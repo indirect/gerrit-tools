@@ -393,7 +393,11 @@ updateReview() {
 openReview() {
   getBranchInfo
 
-  if ! get_change_number_from_branch; then
+  CHANGE=$1
+
+  if [[ $CHANGE ]]; then
+    echo "Using change $CHANGE from command line"
+  elif ! get_change_number_from_branch; then
     warn "$CURRENT is not a review branch"
     exit 2
   fi
@@ -473,7 +477,7 @@ while true; do
       exit
       ;;
     open)
-      openReview
+      openReview $1
       exit
       ;;
     *)
