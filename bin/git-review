@@ -279,7 +279,13 @@ approveChange() {
   local host_and_project=${url_line# *URL: }
   host_and_project=${host_and_project#ssh://}
   local host=${host_and_project%:*}
-  local project=${host_and_project#*:}
+  local project=${host_and_project#*/}
+
+  local port=${host_and_project#*:}
+  port=${port%/*}
+  if [ ! -z "$port" ]; then
+    port="-p $port"
+  fi
 
   getBranchInfo
 
@@ -289,7 +295,7 @@ approveChange() {
 
   local LOG=$($GIT log --pretty="format:%s" $REMOTE/$TRACK..HEAD)
   good "Approving '$LOG'..."
-  ssh $host gerrit approve \
+  ssh $host $port gerrit approve \
       --verified=+1 \
       --code-review=+2 \
       --project=$project $CHANGE,$PATCH ||
