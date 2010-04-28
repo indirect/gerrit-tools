@@ -286,11 +286,29 @@ resetReview() {
 approveChange() {
   local url_line=$($GIT remote show -n origin | grep "URL: " | head -n1)
   local host_and_project=${url_line# *URL: }
-  host_and_project=${host_and_project#ssh://}
-  local host=${host_and_project%:*}
-  local project=${host_and_project#*/}
 
-  local port=${host_and_project#*:}
+  local host
+  local project
+  local port
+
+  if [[ "$host_and_project" =~ "ssh://" ]]; then
+    host_and_project=${host_and_project#ssh://}
+    local host_and_port=${host_and_project%/*}
+
+    if [[ "$host_and_port" =~ ":" ]]; then
+      host=${host_and_port%:*}
+      port=${host_and_port#*:}
+    else
+      host=${host_and_port}
+      port=""
+    fi
+    project=${host_and_project#*/}
+  else
+    host=${host_and_project%:*}
+    project=${host_and_project#*:}
+    port=""
+  fi
+
   port=${port%/*}
   if [ ! -z "$port" ]; then
     port="-p $port"
