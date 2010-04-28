@@ -1,8 +1,5 @@
 #!/bin/bash
 
-CURRENT=$(git symbolic-ref -q HEAD || git rev-parse HEAD)
-CURRENT=${CURRENT#refs/heads/}
-
 this=$(basename "$0")
 
 # default settings
@@ -30,9 +27,18 @@ good() {
 }
 
 #git stuff
-GIT=`which git`
+GIT=$(which git)
 
 GIT_OUTPUT_FILE="/tmp/git_output$$"
+
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+
+if [ -z "$GIT_DIR" ]; then
+  die "$this can only be run from a git repository."
+fi
+
+CURRENT=$(git symbolic-ref -q HEAD || git rev-parse HEAD)
+CURRENT=${CURRENT#refs/heads/}
 
 git() {
   if [ "$verbose" = true ]; then
@@ -269,6 +275,9 @@ resetReview() {
     printUsage
     exit 2
   fi
+
+  # clean up after gerrit-cherry-pick if it failed
+  rm -rf "$GIT_DIR/rebase-gerrit"
 
   git checkout master && git branch -D $CURRENT ||
     die "Unable to close the review branch $CURRENT"
